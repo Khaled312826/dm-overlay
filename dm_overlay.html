@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DM Overlay</title>
+<style>
+  :root{
+    --stack-right: 24px;
+    --stack-bottom: 24px;
+    --max-width: 540px;
+    --bg: rgba(32,36,43,0.92);
+    --text: #fff;
+    --name: #cfd7ff;
+    --shadow: 0 12px 30px rgba(0,0,0,0.35);
+    --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Apple Color Emoji","Segoe UI Emoji";
+  }
+  html, body { margin:0; padding:0; background:transparent; overflow:hidden; }
+  .stack {
+    position: fixed;
+    right: var(--stack-right);
+    bottom: var(--stack-bottom);
+    width: min(var(--max-width), 40vw);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    pointer-events: none;
+    font-family: var(--font);
+  }
+  .bubble {
+    display: inline-flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 16px;
+    padding: 12px 14px;
+    box-shadow: var(--shadow);
+    transform: translateY(20px);
+    opacity: 0;
+    animation: pop-in 280ms ease-out forwards;
+    max-width: 100%;
+  }
+  .avatar {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    display:flex; align-items:center; justify-content:center;
+    font-weight:800; font-size:14px; color:#fff;
+    flex: 0 0 36px;
+    box-shadow: inset 0 0 0 2px rgba(255,255,255,0.15);
+  }
+  .content { line-height: 1.25; }
+  .name { font-weight: 800; font-size: 14px; color: var(--name); margin-bottom: 3px; }
+  .text { font-size: 18px; white-space: pre-wrap; word-wrap: break-word; }
+  .bubble.fade-out { animation: fade-out 400ms ease forwards; }
+  @keyframes pop-in {
+    from { transform: translateY(20px) scale(0.98); opacity:0; }
+    to   { transform: translateY(0)    scale(1.00); opacity:1; }
+  }
+  @keyframes fade-out { to { transform: translateY(10px); opacity:0; } }
+</style>
+</head>
+<body>
+<div class="stack" id="stack"></div>
+
+<script>
+  // ======= CONFIG =======
+  const ENDPOINT = 'https://script.google.com/macros/s/AKfycbzEid08sgUa5dm_ktzM17IH4Jhzg5yEAiNCcg3cLhtA3PhIMd-XMqlUK67H_WQUEkl34A/exec';
+  const POLL_MS = 2000;
+  const SHOW_MS = 7000;
+  const MAX_ONSCREEN = 4;
+  const COOLDOWN_MS = 8000;
+  const MAX_NAME_LEN = 20;
+  const BLOCK_WORDS = []; // add bad words here
+  const NAME_BLOCK = ['admin','moderator','streamer']; // reserved names
+  // ======================
+
+  let latestId = 0;
+  const queue = [];
+  const stack = document.getElementById('stack');
+  const lastSeen = new Map();
+
+  function escapeText(s) {
+    const p = document.createElement('p');
+    p.textContent = (s ?? '');
+    return p.innerHTML;
+  }
+  function safeName(n) {
+    n = (n || '').trim();
+    if (n.length > MAX_NAME_LEN) n = n.slice(0, MAX_NAME_LEN) + '…';
+    return n || 'Anon';
+  }
+  function initials(name) {
+    const parts = (name || 'A').trim().split(/\s+/);
+    const a = (parts[0]?.[0]||'A').toUpperCase();
+    const b = (parts[1]?.[0]||'').toUpperCase();
+    return (a + b).slice(0,2);
+  }
+  function colorFor(name) {
+    let h = 0; const s = (name||'A');
+    for (let i=0;i<s.length;i++) h = (h*31 + s.charCodeAt(i))>>>0;
+    const hue = h % 360;
+    return `hsl(${hue} 75% 45%)`;
+  }
+  function blockedText(t) {
+    const lower = (t||'').toLowerCase();
+    return BLOCK_WORDS.some(w => w && lower.includes(w));
+  }
+  function blockedName(n) {
+    const lower = (n||'').toLowerCase();
+    return NAME_BLOCK.includes(lower);
+  }
+  function withinCooldown(name) {
+    const now = Date.now();
+    const t = lastSeen.get(name) || 0;
+    if (now - t < COOLDOWN_MS) return true;
+    lastSeen.set(name, now);
+    return false;
+  }
+
+  function addBubble(msg) {
+    const name = safeName(msg.name || 'Anon');
+    const el = document.createElement('div');
+    el.className = 'bubble';
+    el.innerHTML = `
+      <div class="avatar" style="background:${colorFor(name)}">${escapeText(initials(name))}</div>
+      <div class="content">
+        <div class="name">${escapeText(name)}</div>
+        <div class="text">${escapeText(msg.text || '')}</div>
+      </div>
+    `;
+    stack.appendChild(el);
+
+    // trim if exceeding
+    const children = [...stack.children];
+    if (children.length > MAX_ONSCREEN) {
+      const first = children[0];
+      first.classList.add('fade-out');
+      setTimeout(() => first.remove(), 350);
+    }
+
+    // schedule fade-out
+    setTimeout(() => {
+      el.classList.add('fade-out');
+      setTimeout(() => el.remove(), 420);
+    }, SHOW_MS);
+  }
+
+  async function poll() {
+    try {
+      const url = latestId ? `${ENDPOINT}?since_id=${latestId}` : ENDPOINT;
+      const res = await fetch(url, { cache: 'no-store' });
+      const data = await res.json();
+      if (Array.isArray(data.messages)) {
+        data.messages.forEach(m => {
+          const uname = safeName(m.name || 'Anon');
+          const text = (m.text || '').toString();
+          if (blockedName(uname) || blockedText(text)) return;
+          if (withinCooldown(uname)) return;
+          queue.push({ name: uname, text });
+        });
+        if (typeof data.latest_id === 'number') {
+          latestId = Math.max(latestId, data.latest_id);
+        }
+      }
+    } catch (e) {
+      // silent fail
+    }
+  }
+
+  setInterval(() => {
+    if (queue.length) addBubble(queue.shift());
+  }, 1000);
+
+  setInterval(poll, POLL_MS);
+  poll();
+</script>
+</body>
+</html>
